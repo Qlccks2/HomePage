@@ -30,6 +30,13 @@
     return "https://www.google.com/s2/favicons?domain=" + domain + "&sz=64";
   }
 
+  // 图标背景色板（最后一项为渐变）
+  const ICON_COLORS = [
+    "#3b82f6", "#f59e0b", "#ef4444", "#795548", "#4caf50", "#1e3a8a",
+    "#c8a415", "#8b1a1a", "#d32f2f", "#1565c0", "#a5d6a7", "#9e9e9e",
+    "gradient",
+  ];
+
   const DEFAULT_DATA = {
     engine: 0,
     wallpaper: 0,
@@ -279,9 +286,11 @@
   }
 
   // ---- 弹窗 ----
-  function openModal(title, bodyHtml) {
+  function openModal(title, bodyHtml, opts) {
+    opts = opts || {};
     modalTitle.textContent = title;
     modalBody.innerHTML = bodyHtml;
+    modal.classList.toggle("large", !!opts.large);
     modalMask.classList.remove("hidden");
   }
   function closeModal() {
@@ -305,51 +314,327 @@
     $("#f-name").focus();
   }
 
+  // ===== iTab 风格添加/编辑图标弹窗 =====
+  // canvas 生成文字图标（纯色/渐变背景 + 白色文字）
+  function makeTextIcon(text, color) {
+    const c = document.createElement("canvas");
+    c.width = 128; c.height = 128;
+    const ctx = c.getContext("2d");
+    if (color === "gradient") {
+      const gd = ctx.createLinearGradient(0, 0, 128, 128);
+      gd.addColorStop(0, "#ff5f6d");
+      gd.addColorStop(0.5, "#ffc371");
+      gd.addColorStop(1, "#47c2ff");
+      ctx.fillStyle = gd;
+    } else {
+      ctx.fillStyle = color;
+    }
+    ctx.fillRect(0, 0, 128, 128);
+    ctx.fillStyle = "#fff";
+    const t = (text || "A").slice(0, 2);
+    ctx.font = '700 ' + (t.length > 1 ? 46 : 56) + 'px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(t, 64, 66);
+    return c.toDataURL("image/png");
+  }
+
+  // 上传图片压缩为 128x128 dataURL（cover 裁剪）
+  function compressImageFile(file, cb) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement("canvas");
+        c.width = 128; c.height = 128;
+        const ctx = c.getContext("2d");
+        const size = Math.min(img.width, img.height);
+        ctx.drawImage(img, (img.width - size) / 2, (img.height - size) / 2, size, size, 0, 0, 128, 128);
+        cb(c.toDataURL("image/png"));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
   function openIconModal(groupId, itemId) {
     const g = data.groups.find((x) => x.id === groupId);
     if (!g) return;
     const it = itemId ? g.items.find((x) => x.id === itemId) : null;
     const isEdit = !!it;
-    openModal(
-      isEdit ? "编辑图标" : "新增图标",
-      '<div class="form-field"><label>名称</label><input id="f-name" type="text" value="' + (isEdit ? escapeHtml(it.name) : "") + '" placeholder="例如：百度" /></div>' +
-      '<div class="form-field"><label>网址（需含 https://）</label><input id="f-url" type="text" value="' + (isEdit ? escapeHtml(it.url) : "") + '" placeholder="https://example.com" /></div>' +
-      '<div class="form-field"><label>图标地址（可留空，自动识别网站图标）</label><input id="f-icon" type="text" value="' + (isEdit && it.icon ? escapeHtml(it.icon) : "") + '" placeholder="https://.../icon.png" /></div>' +
-      '<div class="modal-actions">' +
-        (isEdit ? '<button class="btn btn-danger" id="f-del">删除</button>' : "") +
-        '<button class="btn btn-ghost" id="f-cancel">取消</button>' +
-        '<button class="btn btn-primary" id="f-ok">保存</button>' +
-      '</div>'
-    );
-    $("#f-cancel").onclick = closeModal;
-    $("#f-ok").onclick = () => {
-      const name = $("#f-name").value.trim();
-      let url = $("#f-url").value.trim();
-      const icon = $("#f-icon").value.trim();
-      if (!name || !url) { alert("请填写名称和网址"); return; }
-      if (!/^https?:\/\//i.test(url)) url = "https://" + url;
-      let resolvedIcon = icon;
-      if (!resolvedIcon) {
-        try { resolvedIcon = favicon(new URL(url).hostname); } catch (e) { resolvedIcon = ""; }
+
+    // 弹窗状态
+    const state = {
+      tab: "custom",        // custom=自定义图标 | auto=网址导航
+      source: "text",       // auto | text | upload
+      url: isEdit ? it.url : "",
+      name: isEdit ? it.name : "",
+      iconText: "",
+      color: ICON_COLORS[0],
+      uploadData: "",
+      autoIcon: isEdit && it.icon && !it.icon.startsWith("data:") ? it.icon : "",
+    };
+    if (isEdit) {
+      state.iconText = (it.name || "A").trim().charAt(0);
+      if (it.icon && it.icon.startsWith("data:")) {
+        state.source = "upload";
+        state.uploadData = it.icon;
+        state.tab = "custom";
+      } else {
+        state.source = "auto";
+        state.tab = "auto";
+      }
+    }
+
+    // ---- 渲染 ----
+    function colorDotStyle(color) {
+      return color === "gradient"
+        ? 'background:conic-gradient(from 0deg,#ff5f6d,#ffc371,#4caf50,#47c2ff,#b06ab3,#ff5f6d)'
+        : 'background:' + color;
+    }
+
+    function buildBody() {
+      const sideHtml =
+        '<aside class="dlg-side">' +
+          '<div class="side-item' + (state.tab === "auto" ? " active" : "") + '" data-tab="auto">🌐 网址导航</div>' +
+          '<div class="side-item' + (state.tab === "custom" ? " active" : "") + '" data-tab="custom">🔧 自定义图标</div>' +
+        '</aside>';
+
+      const commonFields =
+        '<div class="panel">' +
+          '<label class="f-label">网址</label>' +
+          '<div class="ipt-row">' +
+            '<input class="ipt" id="f-url" type="text" placeholder="https://" value="' + escapeHtml(state.url) + '" />' +
+            (state.tab === "auto" ? '<button class="btn-fetch" id="f-fetch">获取图标</button>' : '') +
+          '</div>' +
+          '<label class="f-label mt">名称</label>' +
+          '<input class="ipt" id="f-name" type="text" placeholder="网站名称" value="' + escapeHtml(state.name) + '" />' +
+        '</div>';
+
+      let iconPanel = "";
+      if (state.tab === "auto") {
+        // 网址导航 tab：favicon 预览
+        let previewHtml;
+        if (state.autoIcon) {
+          previewHtml = '<img id="autoImg" src="' + escapeHtml(state.autoIcon) + '" alt="" />';
+        } else {
+          previewHtml = '<span>🌐</span>';
+        }
+        iconPanel =
+          '<div class="panel">' +
+            '<label class="f-label">图标预览（自动获取网站图标）</label>' +
+            '<div class="pick-cards">' +
+              '<div class="pick-card active"><div class="pc-box" id="autoBox">' + previewHtml + '</div><div class="pc-name">自动图标</div></div>' +
+            '</div>' +
+          '</div>';
+      } else {
+        // 自定义图标 tab：文字图标 / 上传 卡片 + 文字 + 颜色
+        const textPreview = state.iconText || "A";
+        const textBg = state.color === "gradient"
+          ? 'background:conic-gradient(from 0deg,#ff5f6d,#ffc371,#4caf50,#47c2ff,#b06ab3,#ff5f6d)'
+          : 'background:' + state.color;
+        let uploadInner;
+        if (state.uploadData) {
+          uploadInner = '<img src="' + state.uploadData + '" alt="" />';
+        } else {
+          uploadInner = '<span style="font-size:30px;color:#999;">＋</span>';
+        }
+        iconPanel =
+          '<div class="panel">' +
+            '<div class="pick-cards">' +
+              '<div class="pick-card' + (state.source === "text" ? " active" : "") + '" data-source="text">' +
+                '<div class="pc-box pc-text" id="textCard" style="' + textBg + '">' + escapeHtml(textPreview) + '</div>' +
+                '<div class="pc-name">文字图标</div>' +
+              '</div>' +
+              '<div class="pick-card' + (state.source === "upload" ? " active" : "") + '" data-source="upload">' +
+                '<div class="pc-box" id="uploadBox">' + uploadInner + '</div>' +
+                '<div class="pc-name">上传</div>' +
+              '</div>' +
+              '<div class="pick-card' + (state.source === "auto" ? " active" : "") + '" data-source="auto">' +
+                '<div class="pc-box" id="autoCard">' + (state.autoIcon ? '<img src="' + escapeHtml(state.autoIcon) + '" alt="" />' : '<span>🌐</span>') + '</div>' +
+                '<div class="pc-name">自动获取</div>' +
+              '</div>' +
+            '</div>' +
+            '<label class="f-label mt">图标文字</label>' +
+            '<input class="ipt" id="f-icontext" type="text" maxlength="2" placeholder="A" value="' + escapeHtml(state.iconText) + '" style="width:180px;" />' +
+            '<label class="f-label mt">图标颜色</label>' +
+            '<div class="color-dots" id="colorDots">' +
+              ICON_COLORS.map((c) =>
+                '<div class="color-dot' + (state.color === c ? " active" : "") + '" data-color="' + c + '" style="' + colorDotStyle(c) + '"></div>'
+              ).join("") +
+            '</div>' +
+            '<input type="file" id="f-upload" accept="image/*" style="display:none" />' +
+          '</div>';
+      }
+
+      const actions =
+        '<div class="dlg-actions">' +
+          '<button class="btn-save" id="f-save">保存</button>' +
+          (!isEdit ? '<button class="btn-save-continue" id="f-save-cont">保存并继续</button>' : "") +
+        '</div>';
+
+      return (
+        '<div class="dlg-layout">' + sideHtml +
+        '<div class="dlg-main">' +
+          '<div class="dlg-title"><h3>自定义图标</h3><p>自定义导航图标的内容与样式</p></div>' +
+          commonFields + iconPanel + actions +
+        '</div></div>'
+      );
+    }
+
+    // ---- 事件 ----
+    function bind() {
+      // 左侧 tab 切换（先同步输入值到 state）
+      modalBody.querySelectorAll(".side-item").forEach((el) => {
+        el.addEventListener("click", () => {
+          syncInputs();
+          state.tab = el.dataset.tab;
+          if (state.tab === "auto" && !state.autoIcon && state.url) fetchAutoIcon();
+          rebuild();
+        });
+      });
+
+      // 获取图标
+      const fetchBtn = $("#f-fetch");
+      if (fetchBtn) {
+        fetchBtn.addEventListener("click", () => {
+          syncInputs();
+          fetchAutoIcon();
+          rebuild();
+        });
+      }
+
+      // 图标方式卡片
+      modalBody.querySelectorAll(".pick-card[data-source]").forEach((el) => {
+        el.addEventListener("click", () => {
+          syncInputs();
+          const src = el.dataset.source;
+          if (src === "upload") {
+            state.source = "upload";
+            rebuild();
+            const inp = $("#f-upload");
+            if (inp) inp.click();
+            return;
+          }
+          state.source = src;
+          rebuild();
+        });
+      });
+
+      // 上传文件
+      const uploadInput = $("#f-upload");
+      if (uploadInput) {
+        uploadInput.addEventListener("change", (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+          compressImageFile(file, (dataUrl) => {
+            state.uploadData = dataUrl;
+            state.source = "upload";
+            rebuild();
+            showToast("图片已添加");
+          });
+        });
+      }
+
+      // 图标文字
+      const textInput = $("#f-icontext");
+      if (textInput) {
+        textInput.addEventListener("input", () => {
+          state.iconText = textInput.value.trim();
+          const card = $("#textCard");
+          if (card) card.textContent = state.iconText || "A";
+        });
+      }
+
+      // 颜色
+      const dots = $("#colorDots");
+      if (dots) {
+        dots.querySelectorAll(".color-dot").forEach((el) => {
+          el.addEventListener("click", () => {
+            syncInputs();
+            state.color = el.dataset.color;
+            rebuild();
+          });
+        });
+      }
+
+      // 保存
+      $("#f-save").addEventListener("click", () => doSave(false));
+      const contBtn = $("#f-save-cont");
+      if (contBtn) contBtn.addEventListener("click", () => doSave(true));
+    }
+
+    function syncInputs() {
+      const urlEl = $("#f-url");
+      const nameEl = $("#f-name");
+      if (urlEl) state.url = urlEl.value.trim();
+      if (nameEl) state.name = nameEl.value.trim();
+    }
+
+    function fetchAutoIcon() {
+      if (!state.url) { alert("请先填写网址"); return; }
+      let u = state.url;
+      if (!/^https?:\/\//i.test(u)) u = "https://" + u;
+      try {
+        state.autoIcon = favicon(new URL(u).hostname);
+      } catch (e) { /* ignore */ }
+    }
+
+    function resolveIcon() {
+      if (state.tab === "auto") {
+        if (state.autoIcon) return state.autoIcon;
+        try { return favicon(new URL(normalizeUrl(state.url)).hostname); } catch (e) { return ""; }
+      }
+      if (state.source === "upload") return state.uploadData;
+      return makeTextIcon(state.iconText || state.name.charAt(0), state.color);
+    }
+
+    function normalizeUrl(u) {
+      if (!/^https?:\/\//i.test(u)) return "https://" + u;
+      return u;
+    }
+
+    function doSave(keepAdding) {
+      syncInputs();
+      const name = state.name;
+      if (!name) { alert("请填写名称"); return; }
+      if (!state.url) { alert("请填写网址"); return; }
+      const url = normalizeUrl(state.url);
+      const icon = resolveIcon();
+      if (state.tab === "custom" && state.source === "upload" && !icon) {
+        alert("请先上传一张图片，或选择其他图标方式");
+        return;
       }
       if (isEdit) {
-        it.name = name; it.url = url; it.icon = resolvedIcon;
+        it.name = name; it.url = url; it.icon = icon;
       } else {
-        g.items.push({ id: uid(), name: name, url: url, icon: resolvedIcon });
+        g.items.push({ id: uid(), name: name, url: url, icon: icon });
       }
       save();
       renderNav();
-      closeModal();
-    };
-    if ($("#f-del")) {
-      $("#f-del").onclick = () => {
-        g.items = g.items.filter((x) => x.id !== itemId);
-        save();
-        renderNav();
+      if (keepAdding) {
+        // 重置表单继续添加
+        state.url = ""; state.name = ""; state.uploadData = "";
+        state.iconText = ""; state.autoIcon = "";
+        state.source = "text";
+        modalTitle.textContent = "添加图标";
+        rebuild();
+        showToast("已保存，可继续添加");
+      } else {
         closeModal();
-      };
+      }
     }
-    $("#f-name").focus();
+
+    function rebuild() {
+      modalBody.innerHTML = buildBody();
+      bind();
+      const urlEl = $("#f-url");
+      if (urlEl && !state.name) urlEl.focus();
+    }
+
+    // 打开（大弹窗）
+    openModal(isEdit ? "编辑图标" : "添加图标", buildBody(), { large: true });
+    bind();
   }
 
   function deleteGroup(groupId) {
