@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>我的导航 · MyNav</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- 背景壁纸层 -->
+  <div id="bg" class="bg"></div>
+  <div class="bg-overlay"></div>
+
+  <div class="app">
+    <!-- 顶部时钟 -->
+    <header class="clock-area">
+      <div id="time" class="time">--:--</div>
+      <div id="date" class="date">----年--月--日 星期-</div>
+    </header>
+
+    <!-- 搜索框 -->
+    <div class="search-area">
+      <div class="search-box">
+        <div class="engine-select" id="engineSelect" title="切换搜索引擎">
+          <span id="engineIcon" class="engine-icon">🔍</span>
+          <span id="engineName">百度</span>
+          <span class="engine-arrow">▾</span>
+        </div>
+        <input id="searchInput" type="text" placeholder="输入关键词，回车搜索" autocomplete="off" />
+        <div id="engineMenu" class="engine-menu hidden"></div>
+      </div>
+    </div>
+
+    <!-- 导航分组区 -->
+    <main id="navContainer" class="nav-container"></main>
+
+    <!-- 待办清单 -->
+    <section class="todo-card" id="todoCard">
+      <div class="todo-header">
+        <span class="todo-title">📝 待办</span>
+        <span class="todo-count" id="todoCount">0</span>
+      </div>
+      <ul id="todoList" class="todo-list"></ul>
+      <div class="todo-add">
+        <input id="todoInput" type="text" placeholder="添加待办…" autocomplete="off" />
+      </div>
+    </section>
+
+  <!-- 底部悬停热区 -->
+  <div id="hoverZone" class="hover-zone"></div>
+
+  <!-- 底部设置栏（悬停显示） -->
+  <footer class="toolbar" id="toolbar">
+    <button class="tool-btn" id="btnAddGroup" title="新增分组">＋ 分组</button>
+    <button class="tool-btn" id="btnAddIcon" title="新增图标">＋ 图标</button>
+    <button class="tool-btn" id="btnWallpaper" title="切换壁纸">🖼 壁纸</button>
+    <button class="tool-btn" id="btnAddWallpaper" title="添加在线壁纸">🌐 加壁纸</button>
+    <button class="tool-btn" id="btnExport" title="导出配置">⬇ 导出</button>
+    <button class="tool-btn" id="btnImport" title="导入配置">⬆ 导入</button>
+    <button class="tool-btn" id="btnReset" title="恢复默认">↺ 重置</button>
+    <input type="file" id="importFile" accept="application/json" class="hidden" />
+  </footer>
+  </div>
+
+  <!-- 通用弹窗 -->
+  <div id="modalMask" class="modal-mask hidden">
+    <div class="modal" id="modal">
+      <div class="modal-head">
+        <span id="modalTitle">编辑</span>
+        <button class="modal-close" id="modalClose">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
