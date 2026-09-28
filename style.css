@@ -449,6 +449,8 @@ body {
   white-space: nowrap;
 }
 .btn-fetch:hover { background: rgba(79,124,255,0.06); }
+.btn-fetch[disabled] { opacity: 0.55; cursor: default; }
+.btn-fetch[disabled]:hover { background: #fff; }
 
 /* 图标方式卡片 */
 .pick-cards { display: flex; gap: 16px; }

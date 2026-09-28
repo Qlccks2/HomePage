@@ -419,6 +419,66 @@
     reader.readAsDataURL(file);
   }
 
+  // ===== 网页抓取（借助公共 CORS 代理，依次尝试） =====
+  const PROXY_MAKERS = [
+    (u) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
+    (u) => "https://corsproxy.io/?url=" + encodeURIComponent(u),
+    (u) => "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u),
+  ];
+
+  function parsePageInfo(html, pageUrl) {
+    let doc;
+    try {
+      doc = new DOMParser().parseFromString(html, "text/html");
+    } catch (e) { return null; }
+    // 标题：<title>，其次 og:title
+    let title = "";
+    const tEl = doc.querySelector("title");
+    if (tEl && tEl.textContent) title = tEl.textContent.trim();
+    if (!title) {
+      const og = doc.querySelector('meta[property="og:title"], meta[name="og:title"]');
+      if (og) title = (og.getAttribute("content") || "").trim();
+    }
+    if (title.length > 30) title = title.slice(0, 30);
+    // 图标候选：apple-touch-icon 优先（分辨率高），其次 icon/shortcut，最后 /favicon.ico
+    const icons = [];
+    const push = (href) => {
+      if (!href) return;
+      try {
+        const abs = new URL(href, pageUrl).href;
+        if (!/^https?:/i.test(abs)) return;
+        if (icons.indexOf(abs) === -1) icons.push(abs);
+      } catch (e) { /* ignore */ }
+    };
+    doc.querySelectorAll("link[href]").forEach((l) => {
+      const rel = (l.getAttribute("rel") || "").toLowerCase();
+      if (rel.indexOf("apple-touch-icon") !== -1) push(l.getAttribute("href"));
+    });
+    doc.querySelectorAll("link[href]").forEach((l) => {
+      const rel = (l.getAttribute("rel") || "").toLowerCase();
+      if (rel.indexOf("icon") !== -1 && rel.indexOf("apple") === -1) push(l.getAttribute("href"));
+    });
+    push("/favicon.ico");
+    return { title: title, icons: icons.slice(0, 4) };
+  }
+
+  async function fetchPageInfoViaProxies(pageUrl) {
+    for (let i = 0; i < PROXY_MAKERS.length; i++) {
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 9000);
+        const res = await fetch(PROXY_MAKERS[i](pageUrl), { signal: ctrl.signal });
+        clearTimeout(timer);
+        if (!res.ok) continue;
+        const html = await res.text();
+        if (!html) continue;
+        const info = parsePageInfo(html, pageUrl);
+        if (info && (info.title || info.icons.length)) return info;
+      } catch (e) { /* 换下一个代理 */ }
+    }
+    return null;
+  }
+
   function openIconModal(groupId, itemId) {
     const g = data.groups.find((x) => x.id === groupId);
     if (!g) return;
@@ -427,24 +487,26 @@
 
     // 弹窗状态
     const state = {
-      tab: "custom",        // custom=自定义图标 | auto=网址导航
-      source: "text",       // auto | text | upload
+      source: "text",           // text=文字图标 | fetched=抓取图标 | upload=上传
       url: isEdit ? it.url : "",
       name: isEdit ? it.name : "",
+      nameAuto: !isEdit,        // 名称是否为自动填充（用户手输后置 false，不再覆盖）
       iconText: "",
       color: ICON_COLORS[0],
       uploadData: "",
-      autoIcon: isEdit && it.icon && !it.icon.startsWith("data:") ? it.icon : "",
+      fetchedIcons: [],         // 抓取到的图标候选 URL
+      fetchedIdx: 0,
+      fetching: false,
     };
     if (isEdit) {
       state.iconText = (it.name || "A").trim().charAt(0);
       if (it.icon && it.icon.startsWith("data:")) {
         state.source = "upload";
         state.uploadData = it.icon;
-        state.tab = "custom";
-      } else {
-        state.source = "auto";
-        state.tab = "auto";
+      } else if (it.icon) {
+        state.source = "fetched";
+        state.fetchedIcons = [it.icon];
+        state.fetchedIdx = 0;
       }
     }
 
@@ -456,67 +518,44 @@
     }
 
     function buildBody() {
-      const sideHtml =
-        '<aside class="dlg-side">' +
-          '<div class="side-item' + (state.tab === "auto" ? " active" : "") + '" data-tab="auto">🌐 网址导航</div>' +
-          '<div class="side-item' + (state.tab === "custom" ? " active" : "") + '" data-tab="custom">🔧 自定义图标</div>' +
-        '</aside>';
+      const textPreview = state.iconText || "A";
+      const textBg = state.color === "gradient"
+        ? 'background:conic-gradient(from 0deg,#ff5f6d,#ffc371,#4caf50,#47c2ff,#b06ab3,#ff5f6d)'
+        : 'background:' + state.color;
 
-      const commonFields =
-        '<div class="panel">' +
-          '<label class="f-label">网址</label>' +
-          '<div class="ipt-row">' +
-            '<input class="ipt" id="f-url" type="text" placeholder="https://" value="' + escapeHtml(state.url) + '" />' +
-            (state.tab === "auto" ? '<button class="btn-fetch" id="f-fetch">获取图标</button>' : '') +
-          '</div>' +
-          '<label class="f-label mt">名称</label>' +
-          '<input class="ipt" id="f-name" type="text" placeholder="可留空，自动识别网站名称" value="' + escapeHtml(state.name) + '" />' +
+      // 卡片行：文字图标 + 抓取到的图标1..N + 上传
+      let cards =
+        '<div class="pick-card' + (state.source === "text" ? " active" : "") + '" data-source="text">' +
+          '<div class="pc-box pc-text" id="textCard" style="' + textBg + '">' + escapeHtml(textPreview) + '</div>' +
+          '<div class="pc-name">文字图标</div>' +
+        '</div>';
+      state.fetchedIcons.forEach((u, i) => {
+        cards +=
+          '<div class="pick-card' + (state.source === "fetched" && state.fetchedIdx === i ? " active" : "") + '" data-source="fetched" data-idx="' + i + '">' +
+            '<div class="pc-box"><img src="' + escapeHtml(u) + '" alt="" onerror="this.style.opacity=0.25" /></div>' +
+            '<div class="pc-name">图标' + (i + 1) + '</div>' +
+          '</div>';
+      });
+      cards +=
+        '<div class="pick-card' + (state.source === "upload" ? " active" : "") + '" data-source="upload">' +
+          '<div class="pc-box" id="uploadBox">' + (state.uploadData ? '<img src="' + state.uploadData + '" alt="" />' : '<span style="font-size:30px;color:#999;">＋</span>') + '</div>' +
+          '<div class="pc-name">上传</div>' +
         '</div>';
 
-      let iconPanel = "";
-      if (state.tab === "auto") {
-        // 网址导航 tab：favicon 预览
-        let previewHtml;
-        if (state.autoIcon) {
-          previewHtml = '<img id="autoImg" src="' + escapeHtml(state.autoIcon) + '" alt="" />';
-        } else {
-          previewHtml = '<span>🌐</span>';
-        }
-        iconPanel =
+      const body =
+        '<div class="dlg-main">' +
+          '<div class="dlg-title"><h3>自定义图标</h3><p>自定义导航图标的内容与样式</p></div>' +
           '<div class="panel">' +
-            '<label class="f-label">图标预览（自动获取网站图标）</label>' +
-            '<div class="pick-cards">' +
-              '<div class="pick-card active"><div class="pc-box" id="autoBox">' + previewHtml + '</div><div class="pc-name">自动图标</div></div>' +
+            '<label class="f-label">网址</label>' +
+            '<div class="ipt-row">' +
+              '<input class="ipt" id="f-url" type="text" placeholder="https://" value="' + escapeHtml(state.url) + '" />' +
+              '<button class="btn-fetch" id="f-fetch"' + (state.fetching ? " disabled" : "") + '>' + (state.fetching ? "获取中…" : "获取图标") + '</button>' +
             '</div>' +
-          '</div>';
-      } else {
-        // 自定义图标 tab：文字图标 / 上传 卡片 + 文字 + 颜色
-        const textPreview = state.iconText || "A";
-        const textBg = state.color === "gradient"
-          ? 'background:conic-gradient(from 0deg,#ff5f6d,#ffc371,#4caf50,#47c2ff,#b06ab3,#ff5f6d)'
-          : 'background:' + state.color;
-        let uploadInner;
-        if (state.uploadData) {
-          uploadInner = '<img src="' + state.uploadData + '" alt="" />';
-        } else {
-          uploadInner = '<span style="font-size:30px;color:#999;">＋</span>';
-        }
-        iconPanel =
+            '<label class="f-label mt">名称</label>' +
+            '<input class="ipt" id="f-name" type="text" placeholder="可留空，自动识别网页标题" value="' + escapeHtml(state.name) + '" />' +
+          '</div>' +
           '<div class="panel">' +
-            '<div class="pick-cards">' +
-              '<div class="pick-card' + (state.source === "text" ? " active" : "") + '" data-source="text">' +
-                '<div class="pc-box pc-text" id="textCard" style="' + textBg + '">' + escapeHtml(textPreview) + '</div>' +
-                '<div class="pc-name">文字图标</div>' +
-              '</div>' +
-              '<div class="pick-card' + (state.source === "upload" ? " active" : "") + '" data-source="upload">' +
-                '<div class="pc-box" id="uploadBox">' + uploadInner + '</div>' +
-                '<div class="pc-name">上传</div>' +
-              '</div>' +
-              '<div class="pick-card' + (state.source === "auto" ? " active" : "") + '" data-source="auto">' +
-                '<div class="pc-box" id="autoCard">' + (state.autoIcon ? '<img src="' + escapeHtml(state.autoIcon) + '" alt="" />' : '<span>🌐</span>') + '</div>' +
-                '<div class="pc-name">自动获取</div>' +
-              '</div>' +
-            '</div>' +
+            '<div class="pick-cards">' + cards + '</div>' +
             '<label class="f-label mt">图标文字</label>' +
             '<input class="ipt" id="f-icontext" type="text" maxlength="2" placeholder="A" value="' + escapeHtml(state.iconText) + '" style="width:180px;" />' +
             '<label class="f-label mt">图标颜色</label>' +
@@ -526,49 +565,23 @@
               ).join("") +
             '</div>' +
             '<input type="file" id="f-upload" accept="image/*" style="display:none" />' +
-          '</div>';
-      }
-
-      const actions =
-        '<div class="dlg-actions">' +
-          '<button class="btn-save" id="f-save">保存</button>' +
-          (!isEdit ? '<button class="btn-save-continue" id="f-save-cont">保存并继续</button>' : "") +
+          '</div>' +
+          '<div class="dlg-actions">' +
+            '<button class="btn-save" id="f-save">保存</button>' +
+            (!isEdit ? '<button class="btn-save-continue" id="f-save-cont">保存并继续</button>' : "") +
+          '</div>' +
         '</div>';
-
-      return (
-        '<div class="dlg-layout">' + sideHtml +
-        '<div class="dlg-main">' +
-          '<div class="dlg-title"><h3>自定义图标</h3><p>自定义导航图标的内容与样式</p></div>' +
-          commonFields + iconPanel + actions +
-        '</div></div>'
-      );
+      return body;
     }
 
     // ---- 事件 ----
     function bind() {
-      // 左侧 tab 切换（先同步输入值到 state）
-      modalBody.querySelectorAll(".side-item").forEach((el) => {
-        el.addEventListener("click", () => {
-          syncInputs();
-          state.tab = el.dataset.tab;
-          if (state.tab === "auto") {
-            if (!state.autoIcon && state.url) fetchAutoIcon();
-            else if (!state.name && state.url) {
-              // 名称未填，用域名推断
-              try { state.name = nameFromDomain(new URL(normalizeUrl(state.url)).hostname); } catch (e) {}
-            }
-          }
-          rebuild();
-        });
-      });
-
-      // 获取图标
+      // 获取图标（真正抓取网页：标题 + 图标候选）
       const fetchBtn = $("#f-fetch");
       if (fetchBtn) {
         fetchBtn.addEventListener("click", () => {
           syncInputs();
-          fetchAutoIcon();
-          rebuild();
+          fetchPageInfo();
         });
       }
 
@@ -585,6 +598,7 @@
             return;
           }
           state.source = src;
+          if (src === "fetched") state.fetchedIdx = parseInt(el.dataset.idx, 10) || 0;
           rebuild();
         });
       });
@@ -614,6 +628,12 @@
         });
       }
 
+      // 名称（用户手输后不再自动覆盖）
+      const nameInput = $("#f-name");
+      if (nameInput) {
+        nameInput.addEventListener("input", () => { state.nameAuto = false; });
+      }
+
       // 颜色
       const dots = $("#colorDots");
       if (dots) {
@@ -639,24 +659,48 @@
       if (nameEl) state.name = nameEl.value.trim();
     }
 
-    function fetchAutoIcon() {
+    // 真正抓取网页：标题自动填名称 + 图标候选
+    async function fetchPageInfo() {
       if (!state.url) { alert("请先填写网址"); return; }
-      let u = state.url;
-      if (!/^https?:\/\//i.test(u)) u = "https://" + u;
-      try {
-        const host = new URL(u).hostname;
-        state.autoIcon = favicon(host);
-        // 名称未填时，自动用域名推断
-        if (!state.name) {
-          state.name = nameFromDomain(host);
+      if (state.fetching) return;
+      state.fetching = true;
+      rebuild();
+
+      const u = normalizeUrl(state.url);
+      const info = await fetchPageInfoViaProxies(u);
+      let host = "";
+      try { host = new URL(u).hostname; } catch (e) {}
+
+      if (info && (info.icons.length || info.title)) {
+        // 标题 → 名称（仅当名称为空或此前是自动填充时覆盖）
+        if (info.title && (!state.name || state.nameAuto)) {
+          state.name = info.title;
+          state.nameAuto = true;
         }
-      } catch (e) { /* ignore */ }
+        // 图标候选：网页解析结果 + favicon 服务兜底
+        let cands = info.icons.slice();
+        if (host) faviconSources(host).forEach((s) => { if (cands.indexOf(s) === -1) cands.push(s); });
+        state.fetchedIcons = cands.slice(0, 5);
+        state.source = "fetched";
+        state.fetchedIdx = 0;
+        showToast("已抓取 " + state.fetchedIcons.length + " 个候选图标");
+      } else {
+        // 代理全部失败：退回 favicon 服务
+        if (host) {
+          state.fetchedIcons = faviconSources(host).slice(0, 3);
+          state.source = "fetched";
+          state.fetchedIdx = 0;
+          if (!state.name || state.nameAuto) { state.name = nameFromDomain(host); state.nameAuto = true; }
+        }
+        showToast("网页读取失败，已使用备用图标源");
+      }
+      state.fetching = false;
+      rebuild();
     }
 
     function resolveIcon() {
-      if (state.tab === "auto") {
-        if (state.autoIcon) return state.autoIcon;
-        try { return favicon(new URL(normalizeUrl(state.url)).hostname); } catch (e) { return ""; }
+      if (state.source === "fetched") {
+        return state.fetchedIcons[state.fetchedIdx] || "";
       }
       if (state.source === "upload") return state.uploadData;
       return makeTextIcon(state.iconText || state.name.charAt(0), state.color);
@@ -681,7 +725,7 @@
         }
       }
       const icon = resolveIcon();
-      if (state.tab === "custom" && state.source === "upload" && !icon) {
+      if (state.source === "upload" && !icon) {
         alert("请先上传一张图片，或选择其他图标方式");
         return;
       }
@@ -695,8 +739,8 @@
       if (keepAdding) {
         // 重置表单继续添加
         state.url = ""; state.name = ""; state.uploadData = "";
-        state.iconText = ""; state.autoIcon = "";
-        state.source = "text";
+        state.iconText = ""; state.fetchedIcons = []; state.fetchedIdx = 0;
+        state.source = "text"; state.nameAuto = true;
         modalTitle.textContent = "添加图标";
         rebuild();
         showToast("已保存，可继续添加");
