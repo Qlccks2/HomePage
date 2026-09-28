@@ -30,6 +30,54 @@
     return "https://www.google.com/s2/favicons?domain=" + domain + "&sz=64";
   }
 
+  // 多源 favicon（谷歌失败自动切换微软/DuckDuckGo）
+  function faviconSources(domain) {
+    return [
+      "https://www.google.com/s2/favicons?domain=" + domain + "&sz=64",
+      "https://api.faviconkit.com/" + domain + "/64",
+      "https://icons.duckduckgo.com/ip3/" + domain + ".ico",
+      "https://favicon.im/" + domain,
+    ];
+  }
+
+  // 从域名推断名称（内置常见中文名映射）
+  const DOMAIN_NAMES = {
+    "baidu.com": "百度", "google.com": "Google", "bing.com": "必应",
+    "bilibili.com": "B站", "zhihu.com": "知乎", "github.com": "GitHub",
+    "weibo.com": "微博", "taobao.com": "淘宝", "jd.com": "京东",
+    "qq.com": "腾讯", "mail.qq.com": "QQ邮箱", "pan.baidu.com": "百度网盘",
+    "fanyi.baidu.com": "百度翻译", "map.baidu.com": "百度地图",
+    "douyin.com": "抖音", "xiaohongshu.com": "小红书", "bilibili.com": "哔哩哔哩",
+    "youku.com": "优酷", "iqiyi.com": "爱奇艺", "tieba.baidu.com": "百度贴吧",
+    "csdn.net": "CSDN", "juejin.cn": "掘金", "zhihu.com": "知乎",
+    "stackoverflow.com": "Stack Overflow", "youtube.com": "YouTube",
+    "twitter.com": "Twitter", "facebook.com": "Facebook",
+    "instagram.com": "Instagram", "reddit.com": "Reddit",
+    "amazon.com": "Amazon", "alibaba.com": "阿里巴巴", "1688.com": "阿里巴巴",
+    "v2ex.com": "V2EX", "sspai.com": "少数派", "36kr.com": "36氪",
+    "gitee.com": "Gitee", "gitlab.com": "GitLab", "openai.com": "OpenAI",
+    "notion.so": "Notion", "figma.com": "Figma", "dribbble.com": "Dribbble",
+    "wikipedia.org": "维基百科", "sina.com.cn": "新浪", "sohu.com": "搜狐",
+    "163.com": "网易", "netease.com": "网易", "mi.com": "小米",
+    "huawei.com": "华为", "apple.com": "Apple", "microsoft.com": "微软",
+    "tencent.com": "腾讯", "bytedance.com": "字节跳动", "meituan.com": "美团",
+    "dianping.com": "大众点评", "ctrip.com": "携程", "qunar.com": "去哪儿",
+  };
+  function nameFromDomain(hostname) {
+    // 先去掉 www. 前缀
+    let h = hostname.replace(/^www\./, "");
+    // 精确匹配
+    if (DOMAIN_NAMES[h]) return DOMAIN_NAMES[h];
+    // 去掉子域名再试（如 mail.qq.com -> qq.com）
+    const parts = h.split(".");
+    for (let i = 1; i < parts.length - 1; i++) {
+      const sub = parts.slice(i).join(".");
+      if (DOMAIN_NAMES[sub]) return DOMAIN_NAMES[sub];
+    }
+    // 取主域名首字母大写作为兜底
+    return parts.length >= 2 ? parts[parts.length - 2] : hostname;
+  }
+
   // 图标背景色板（最后一项为渐变）
   const ICON_COLORS = [
     "#3b82f6", "#f59e0b", "#ef4444", "#795548", "#4caf50", "#1e3a8a",
@@ -199,7 +247,21 @@
           img.src = it.icon;
           img.alt = "";
           img.loading = "lazy";
-          img.onerror = () => { img.replaceWith(letterIcon(it.name)); };
+          // 图标加载失败时，尝试多源 fallback
+          let failIdx = 0;
+          img.onerror = () => {
+            try {
+              const domain = new URL(it.url).hostname;
+              const srcs = faviconSources(domain);
+              if (failIdx < srcs.length) {
+                img.src = srcs[failIdx++];
+              } else {
+                img.replaceWith(letterIcon(it.name));
+              }
+            } catch (e) {
+              img.replaceWith(letterIcon(it.name));
+            }
+          };
           iconWrap.appendChild(img);
         } else {
           iconWrap.appendChild(letterIcon(it.name));
@@ -408,7 +470,7 @@
             (state.tab === "auto" ? '<button class="btn-fetch" id="f-fetch">获取图标</button>' : '') +
           '</div>' +
           '<label class="f-label mt">名称</label>' +
-          '<input class="ipt" id="f-name" type="text" placeholder="网站名称" value="' + escapeHtml(state.name) + '" />' +
+          '<input class="ipt" id="f-name" type="text" placeholder="可留空，自动识别网站名称" value="' + escapeHtml(state.name) + '" />' +
         '</div>';
 
       let iconPanel = "";
@@ -489,7 +551,13 @@
         el.addEventListener("click", () => {
           syncInputs();
           state.tab = el.dataset.tab;
-          if (state.tab === "auto" && !state.autoIcon && state.url) fetchAutoIcon();
+          if (state.tab === "auto") {
+            if (!state.autoIcon && state.url) fetchAutoIcon();
+            else if (!state.name && state.url) {
+              // 名称未填，用域名推断
+              try { state.name = nameFromDomain(new URL(normalizeUrl(state.url)).hostname); } catch (e) {}
+            }
+          }
           rebuild();
         });
       });
@@ -576,7 +644,12 @@
       let u = state.url;
       if (!/^https?:\/\//i.test(u)) u = "https://" + u;
       try {
-        state.autoIcon = favicon(new URL(u).hostname);
+        const host = new URL(u).hostname;
+        state.autoIcon = favicon(host);
+        // 名称未填时，自动用域名推断
+        if (!state.name) {
+          state.name = nameFromDomain(host);
+        }
       } catch (e) { /* ignore */ }
     }
 
@@ -596,10 +669,17 @@
 
     function doSave(keepAdding) {
       syncInputs();
-      const name = state.name;
-      if (!name) { alert("请填写名称"); return; }
+      let name = state.name;
       if (!state.url) { alert("请填写网址"); return; }
       const url = normalizeUrl(state.url);
+      // 名称未填时，自动从域名推断
+      if (!name) {
+        try {
+          name = nameFromDomain(new URL(url).hostname);
+        } catch (e) {
+          name = url;
+        }
+      }
       const icon = resolveIcon();
       if (state.tab === "custom" && state.source === "upload" && !icon) {
         alert("请先上传一张图片，或选择其他图标方式");
